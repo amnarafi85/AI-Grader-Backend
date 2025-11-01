@@ -77,7 +77,7 @@ const visionClient = new ImageAnnotatorClient({
 // ============================================================
 app.use(
   cors({
-    origin: ["http://localhost:5173"],
+    origin: ["http://localhost:5173","https://ai-grader-frontend-n08j.onrender.com"],
     methods: ["GET", "POST"],
     allowedHeaders: ["Content-Type"],
   })
