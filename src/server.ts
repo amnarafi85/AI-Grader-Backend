@@ -23,7 +23,24 @@ import fs from "fs";
 // const pdfParse = require("pdf-parse");
 // ❌ DO NOT import pdf-poppler at top (crashes on Linux)
 // import { convert } from "pdf-poppler";
-import sharp, { OutputInfo } from "sharp";
+
+// ✅ Make sharp optional (avoids native binary crash on some platforms like Render)
+//    We lazy-require it only when needed; if unavailable, we fall back safely.
+let __sharpOnce: any | undefined = undefined;
+type OutputInfo = any;
+function getSharp(): any | null {
+  if (__sharpOnce !== undefined) return __sharpOnce || null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    __sharpOnce = require("sharp");
+    return __sharpOnce;
+  } catch (e: any) {
+    console.warn("⚠️ sharp unavailable on this platform:", e?.message || e);
+    __sharpOnce = null;
+    return null;
+  }
+}
+
 import { setupGraderRoutes } from "./grader";
 import fetch from "node-fetch";
 
@@ -157,7 +174,7 @@ let CURRENT_OCR_CTX: OcrNamingContext = { firstIsSolution: false, pagesPerStuden
 
 // 🔹 Lazy loader for pdf-parse (avoid DOMMatrix crash if it initializes)
 function getPdfParse():
-  | ((buf: Buffer) => Promise<{ text?: string }>)
+  | ((buf: Buffer) => Promise<{ text?: string }> )
   | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -189,13 +206,27 @@ function getPopplerConvert(): PopplerConvertFn | null {
 // Small helper to cap base64 data-URIs to ~19MB (OpenAI hard limit ~20MB)
 async function toDataURIWithCap(imgPath: string, maxBytes = 19 * 1024 * 1024): Promise<string> {
   let buf: Buffer = fs.readFileSync(imgPath) as Buffer;
-  const meta = await sharp(buf).metadata();
-  let width = meta.width || 2600;
-  while (buf.byteLength > maxBytes && width > 900) {
-    width = Math.floor(width * 0.85);
-    const next: Buffer = await sharp(buf).resize({ width }).png({ compressionLevel: 9 }).toBuffer();
-    buf = next;
+
+  const s = getSharp();
+  if (s) {
+    try {
+      const meta = await s(buf).metadata();
+      let width = meta.width || 2600;
+      while (buf.byteLength > maxBytes && width > 900) {
+        width = Math.floor(width * 0.85);
+        const next: Buffer = await s(buf).resize({ width }).png({ compressionLevel: 9 }).toBuffer();
+        buf = next;
+      }
+    } catch (e: any) {
+      console.warn("⚠️ sharp resize failed; sending original buffer:", e?.message || e);
+    }
+  } else {
+    // No sharp available; we’ll just send the original buffer (may exceed API limits for very large pages).
+    if (buf.byteLength > maxBytes) {
+      console.warn("⚠️ Image exceeds preferred cap but sharp is unavailable; sending original.");
+    }
   }
+
   return `data:image/png;base64,${buf.toString("base64")}`;
 }
 
@@ -227,29 +258,38 @@ async function ocrWithVisionImagesMultiVariant(pdfPath: string, baseKey: string)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
   let mergedDoc = "";
+  const s = getSharp();
 
   for (const img of imageFiles) {
     const imgPath = path.join(dir, img);
+
+    // If sharp is unavailable, skip variant generation and run Vision on the base image
     const variants: Array<{ path: string }> = [];
     const variantBuilds: Array<Promise<OutputInfo>> = [];
 
-    const addVariant = (p: string, pipeline: sharp.Sharp) => {
-      variants.push({ path: p });
-      variantBuilds.push(pipeline.toFile(p));
-    };
+    if (s) {
+      const addVariant = (p: string, pipeline: any) => {
+        variants.push({ path: p });
+        variantBuilds.push(pipeline.toFile(p));
+      };
 
-    const base = sharp(imgPath).resize({ width: 2500 }).grayscale().normalize().median(1);
-    addVariant(imgPath.replace(".jpg", "_v1_light.jpg"), base.clone().sharpen());
-    addVariant(imgPath.replace(".jpg", "_v2_t150.jpg"), base.clone().threshold(150));
-    addVariant(imgPath.replace(".jpg", "_v3_t175.jpg"), base.clone().threshold(175));
-    addVariant(imgPath.replace(".jpg", "_v4_invert.jpg"), base.clone().negate());
+      const base = s(imgPath).resize({ width: 2500 }).grayscale().normalize().median(1);
+      addVariant(imgPath.replace(".jpg", "_v1_light.jpg"), base.clone().sharpen());
+      addVariant(imgPath.replace(".jpg", "_v2_t150.jpg"), base.clone().threshold(150));
+      addVariant(imgPath.replace(".jpg", "_v3_t175.jpg"), base.clone().threshold(175));
+      addVariant(imgPath.replace(".jpg", "_v4_invert.jpg"), base.clone().negate());
 
-    const angles = [-4, -2, 0, 2, 4];
-    angles.forEach((deg) => {
-      addVariant(imgPath.replace(".jpg", `_rot_${deg}.jpg`), base.clone().rotate(deg).sharpen());
-    });
+      const angles = [-4, -2, 0, 2, 4];
+      angles.forEach((deg) => {
+        addVariant(imgPath.replace(".jpg", `_rot_${deg}.jpg`), base.clone().rotate(deg).sharpen());
+      });
 
-    await Promise.allSettled(variantBuilds);
+      await Promise.allSettled(variantBuilds);
+    } else {
+      // No sharp; just use the original image
+      variants.push({ path: imgPath });
+    }
+
     const variantResults: Array<{ text: string; score: number }> = [];
     const ocrPasses = [{ hints: ["en", "en-t-i0-handwrit"] }, { hints: ["und", "en"] }];
 
@@ -300,8 +340,11 @@ async function ocrWithVisionImagesMultiVariant(pdfPath: string, baseKey: string)
       console.log(`📜 ${img} kept ${pageText.length} chars`);
     } else console.log(`⚠️ ${img} low quality, skipping`);
 
+    // Cleanup generated variants (if any)
     for (const v of variants) {
-      try { if (fs.existsSync(v.path)) fs.unlinkSync(v.path); } catch {}
+      if (v.path !== imgPath) {
+        try { if (fs.existsSync(v.path)) fs.unlinkSync(v.path); } catch {}
+      }
     }
     try { fs.unlinkSync(imgPath); } catch {}
   }
@@ -440,6 +483,7 @@ async function ocrWithOpenAIOCR(pdfPath: string) {
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
     let allText = "";
+    const s = getSharp();
 
     for (let idx = 0; idx < rawImages.length; idx++) {
       const img = rawImages[idx];
@@ -474,17 +518,25 @@ async function ocrWithOpenAIOCR(pdfPath: string) {
 
       const raw = path.join(dir, img);
 
-      const preOut = raw.replace(".png", "_pre.png");
-      const meta = await sharp(raw).metadata();
-      const targetWidth = Math.max(Math.min((meta.width || 2400), 2800), 1800);
-      await sharp(raw)
-        .resize({ width: targetWidth })
-        .grayscale()
-        .normalize()
-        .median(1)
-        .sharpen()
-        .png({ compressionLevel: 9 })
-        .toFile(preOut);
+      let preOut = raw;
+      if (s) {
+        try {
+          preOut = raw.replace(".png", "_pre.png");
+          const meta = await s(raw).metadata();
+          const targetWidth = Math.max(Math.min((meta.width || 2400), 2800), 1800);
+          await s(raw)
+            .resize({ width: targetWidth })
+            .grayscale()
+            .normalize()
+            .median(1)
+            .sharpen()
+            .png({ compressionLevel: 9 })
+            .toFile(preOut);
+        } catch (e: any) {
+          console.warn("⚠️ sharp preprocessing failed; using raw image:", e?.message || e);
+          preOut = raw;
+        }
+      }
 
       const dataURI = await toDataURIWithCap(preOut);
 
@@ -545,7 +597,9 @@ async function ocrWithOpenAIOCR(pdfPath: string) {
         console.warn(`⚠️ No meaningful text from ${img}${lastErrText ? " — last error: " + lastErrText : ""}`);
       }
 
-      try { fs.unlinkSync(preOut); } catch {}
+      if (s && preOut !== raw) {
+        try { fs.unlinkSync(preOut); } catch {}
+      }
       try { fs.unlinkSync(raw); } catch {}
     }
 
@@ -596,6 +650,7 @@ async function ocrWithGeminiOCR(pdfPath: string) {
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
     let allText = "";
+    const s = getSharp();
 
     for (let idx = 0; idx < pngs.length; idx++) {
       const img = pngs[idx];
@@ -630,17 +685,25 @@ async function ocrWithGeminiOCR(pdfPath: string) {
 
       const imgPath = path.join(dir, img);
 
-      const preOut = imgPath.replace(".png", "_pre.png");
-      const meta = await sharp(imgPath).metadata();
-      const targetWidth = Math.max(Math.min((meta.width || 2400), 2800), 1800);
-      await sharp(imgPath)
-        .resize({ width: targetWidth })
-        .grayscale()
-        .normalize()
-        .median(1)
-        .sharpen()
-        .png({ compressionLevel: 9 })
-        .toFile(preOut);
+      let preOut = imgPath;
+      if (s) {
+        try {
+          preOut = imgPath.replace(".png", "_pre.png");
+          const meta = await s(imgPath).metadata();
+          const targetWidth = Math.max(Math.min((meta.width || 2400), 2800), 1800);
+          await s(imgPath)
+            .resize({ width: targetWidth })
+            .grayscale()
+            .normalize()
+            .median(1)
+            .sharpen()
+            .png({ compressionLevel: 9 })
+            .toFile(preOut);
+        } catch (e: any) {
+          console.warn("⚠️ sharp preprocessing failed; using raw image:", e?.message || e);
+          preOut = imgPath;
+        }
+      }
 
       const dataUri = await toDataURIWithCap(preOut);
 
@@ -757,7 +820,9 @@ async function ocrWithGeminiOCR(pdfPath: string) {
         console.warn(`⚠️ Gemini: no meaningful text from ${path.basename(imgPath)}${lastError ? " — last error: " + lastError : ""}`);
       }
 
-      try { fs.unlinkSync(preOut); } catch {}
+      if (s && preOut !== imgPath) {
+        try { fs.unlinkSync(preOut); } catch {}
+      }
       try { fs.unlinkSync(imgPath); } catch {}
     }
 
