@@ -19,7 +19,7 @@ import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import { ImageAnnotatorClient } from "@google-cloud/vision";
 import fs from "fs";
-const pdfParse = require("pdf-parse"); // ✅ compatible import
+// const pdfParse = require("pdf-parse"); // ✅ compatible import (moved to lazy require)
 // @ts-ignore
 import { convert } from "pdf-poppler";
 import sharp, { OutputInfo } from "sharp";
@@ -752,6 +752,8 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
 
     const tryPdfParse = async () => {
       try {
+        // Lazy require so server can start even if pdf-parse needs DOM canvas
+        const pdfParse = require("pdf-parse");
         const pdfBuffer = fs.readFileSync(tempPdfPath);
         const pdfData = await pdfParse(pdfBuffer);
         const txt = stripGarbage(pdfData.text || "");
