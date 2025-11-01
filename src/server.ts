@@ -313,7 +313,7 @@ async function ocrWithTesseract(pdfPath: string, baseKey: string) {
     out_prefix: `tess_${baseKey}`,
     page: null,
     dpi: 300,
-  });
+  } as any); // 👈 allow dpi in options
 
   const dir = path.dirname(outputBase);
   const imageFiles = fs
@@ -381,7 +381,7 @@ async function ocrWithOpenAIOCR(pdfPath: string) {
       out_prefix: path.basename(outputBase),
       page: null,
       dpi: 420,
-    });
+    } as any); // 👈 allow dpi in options
 
     const dir = path.dirname(outputBase);
     const rawImages = fs
@@ -532,7 +532,7 @@ async function ocrWithGeminiOCR(pdfPath: string) {
       out_prefix: path.basename(outputBase),
       page: null,
       dpi: 420,
-    });
+    } as any); // 👈 allow dpi in options
 
     const dir = path.dirname(outputBase);
     const pngs = fs
@@ -560,7 +560,8 @@ async function ocrWithGeminiOCR(pdfPath: string) {
             "Roll: <value>\n" +
             "----\n" +
             "Rules for <value>:\n" +
-            `- CURRENT_PAPER_IS_SOLUTION = ${isSolutionForThisPaper ? "true" : "false"}.\n` +
+            `- CURRENT_PAPER_IS_SOLUTION = ${isSolutionForThisPaper ? "true" : "false"}.\n" +
+            ""` +
             (isSolutionForThisPaper
               ? `- If CURRENT_PAPER_IS_SOLUTION is true, set BOTH Name and Roll to '${solutionName}'.\n`
               : `- If CURRENT_PAPER_IS_SOLUTION is false, try to read the student's name/roll from the page. If none is clearly present, set BOTH Name and Roll to '${unknownName}'.\n`) +
@@ -636,6 +637,7 @@ async function ocrWithGeminiOCR(pdfPath: string) {
 
       // 2) Official Google REST
       if (!pageText) {
+        const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
         if (!GOOGLE_API_KEY) {
           console.warn("⚠️ GOOGLE_API_KEY missing; cannot call official Gemini API");
         } else {
