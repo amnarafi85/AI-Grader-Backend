@@ -1,280 +1,176 @@
 // ============================================================
-// green_graded.ts — Build ONE merged, green-stamped PDF for all students
-// Route: POST /build-green-graded/:id
+// green_page_map.ts — Types + page mapping helper
 // ============================================================
 
-import { Express, Request, Response } from "express";
-import { PDFDocument, StandardFonts, rgb, PDFPage } from "pdf-lib";
-import { mapPagesToStudents, StudentGraded, Question, Subpart } from "./green_page_map";
-
-// Buckets must match your existing setup
-const QUIZ_BUCKET = "quizzes";
-const GRADED_BUCKET = "graded";
-
-function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
-  const ab = new ArrayBuffer(u8.byteLength);
-  new Uint8Array(ab).set(u8);
-  return ab;
+export interface Subpart {
+  label?: string;
+  marks?: number;
+  max_marks?: number;
 }
 
-const green = () => rgb(0.05, 0.55, 0.05);
-const yellowSticky = () => rgb(1, 1, 0.85);
-
-function wrapLines(text: string, maxChars = 90): string[] {
-  const t = (text || "").trim();
-  if (!t) return [];
-  const words = t.split(/\s+/);
-  const out: string[] = [];
-  let cur = "";
-  for (const w of words) {
-    const tryLine = cur ? cur + " " + w : w;
-    if (tryLine.length > maxChars) {
-      if (cur) out.push(cur);
-      cur = w;
-    } else {
-      cur = tryLine;
-    }
-  }
-  if (cur) out.push(cur);
-  return out;
+export interface Question {
+  number?: number | string;
+  marks?: number;
+  max_marks?: number;
+  topic?: string;
+  subparts?: Subpart[];
+  remarks?: string;
 }
 
-async function drawGreenCircleAndSticky(
-  p: PDFPage,
-  fonts: { bold: any; regular: any },
-  student: StudentGraded,
-  options?: {
-    circle?: { x?: number; y?: number; r?: number };
-    sticky?: { x?: number; y?: number; w?: number; h?: number; fontSize?: number };
-  }
-) {
-  const { width, height } = p.getSize();
-
-  // Circle at top-right
-  const r = options?.circle?.r ?? 48;
-  const cx = options?.circle?.x ?? (width - r - 36);
-  const cy = options?.circle?.y ?? (height - r - 36);
-
-  p.drawEllipse({
-    x: cx,
-    y: cy,
-    xScale: r,
-    yScale: r,
-    borderColor: green(),
-    borderWidth: 4,
-  });
-
-  const obtained = student.total_score ?? 0;
-  const total = student.max_score ?? 0;
-  const scoreText = `${obtained}/${total}`;
-  const label = "Marks";
-
-  const scoreSize = 16;
-  const labelSize = 9;
-  const scoreW = fonts.bold.widthOfTextAtSize(scoreText, scoreSize);
-  const labelW = fonts.regular.widthOfTextAtSize(label, labelSize);
-
-  p.drawText(scoreText, {
-    x: cx - scoreW / 2,
-    y: cy - 6,
-    size: scoreSize,
-    color: green(),
-    font: fonts.bold,
-  });
-  p.drawText(label, {
-    x: cx - labelW / 2,
-    y: cy - 22,
-    size: labelSize,
-    color: green(),
-    font: fonts.regular,
-  });
-
-  // Sticky (top-left area)
-  const stickyX = options?.sticky?.x ?? 36;
-  const stickyY = options?.sticky?.y ?? (height - 220);
-  const stickyW = options?.sticky?.w ?? Math.min(420, width - 72);
-  const stickyH = options?.sticky?.h ?? 180;
-  const fs = options?.sticky?.fontSize ?? 10;
-
-  p.drawRectangle({
-    x: stickyX,
-    y: stickyY,
-    width: stickyW,
-    height: stickyH,
-    color: yellowSticky(),
-    borderColor: green(),
-    borderWidth: 2,
-    opacity: 0.98,
-  });
-
-  const header =
-    `${student.student_name || "Student"} (${student.roll_number || "-"}) — ` +
-    `${obtained} / ${total}`;
-
-  p.drawText(header, {
-    x: stickyX + 8,
-    y: stickyY + stickyH - 18,
-    size: 12,
-    color: green(),
-    font: fonts.bold,
-    maxWidth: stickyW - 16,
-  });
-
-  // Build sticky content
-  const lines: string[] = [];
-  if (Array.isArray(student.questions)) {
-    for (const q of student.questions as Question[]) {
-      const qn = q.number ?? "?";
-      const mm = q.max_marks ?? "-";
-      lines.push(`Q${qn}: ${q.marks ?? 0}/${mm}` + (q.topic ? ` — ${q.topic}` : ""));
-      if (Array.isArray(q.subparts) && q.subparts.length) {
-        const subs = (q.subparts as Subpart[])
-          .map((s) => `${s.label ?? "?"}:${s.marks ?? 0}/${s.max_marks ?? "-"}`)
-          .join("   ");
-        lines.push(`   • ${subs}`);
-      }
-      if (q.remarks) lines.push(`   ↳ ${q.remarks}`);
-    }
-  }
-  if (student.remarks) {
-    lines.push("");
-    lines.push("Feedback:");
-    lines.push(...wrapLines(student.remarks, 90));
-  }
-
-  let cursorY = stickyY + stickyH - 36;
-  const lineH = fs + 3;
-  for (const line of lines) {
-    if (cursorY < stickyY + 10) break;
-    p.drawText(line, {
-      x: stickyX + 8,
-      y: cursorY,
-      size: fs,
-      color: rgb(0.1, 0.1, 0.1),
-      font: fonts.regular,
-      maxWidth: stickyW - 16,
-    });
-    cursorY -= lineH;
-  }
-}
-
-async function annotateStudentSection(outDoc: PDFDocument, studentPages: PDFPage[], student: StudentGraded) {
-  const fontBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
-  const font = await outDoc.embedFont(StandardFonts.Helvetica);
-
-  if (!studentPages.length) return;
-
-  // Circle + sticky on the first page of the student's section
-  await drawGreenCircleAndSticky(studentPages[0], { bold: fontBold, regular: font }, student);
-
-  // Footer on each page
-  const footerText = `${student.student_name || "Student"} (${student.roll_number || "-"})`;
-  const fs = 9;
-  for (const p of studentPages) {
-    const { width } = p.getSize();
-    const w = font.widthOfTextAtSize(footerText, fs);
-    p.drawText(footerText, {
-      x: width - w - 36,
-      y: 24,
-      size: fs,
-      color: rgb(0.15, 0.15, 0.15),
-      font,
-    });
-  }
+export interface StudentGraded {
+  student_name?: string;
+  roll_number?: string;
+  total_score?: number;
+  max_score?: number;
+  // Optional precomputed page indices for this student (0-based).
+  page_indices?: number[];
+  questions?: Question[];
+  remarks?: string;
 }
 
 /**
- * Builds ONE merged PDF for all students (green circle + sticky).
- * Auto-maps pages using `grades.graded_json.page_indices`, or `quizzes.page_texts`,
- * or falls back to even split if neither is available.
+ * Sanitize a candidate list of indices to be unique, in-range, sorted numbers.
  */
-export async function buildGreenMergedPdf(supabase: any, quizId: string): Promise<string> {
-  // 1) Load quiz + original PDF (+ optional page_texts if present)
-  const { data: quiz, error: quizError } = await supabase
-    .from("quizzes")
-    .select("id, original_pdf, page_texts")
-    .eq("id", quizId)
-    .single();
-  if (quizError || !quiz?.original_pdf) {
-    throw new Error("Quiz or original PDF not found");
-  }
+function normalizeIndices(indices: unknown[], pageCount: number): number[] {
+  // ensure numbers
+  const nums: number[] = (indices || [])
+    .map((v) => (typeof v === "number" ? v : Number.isFinite(v as any) ? Number(v) : NaN))
+    .filter((n) => Number.isInteger(n) && n >= 0 && n < pageCount);
 
-  // Download original
-  const { data: file, error: dErr } = await supabase.storage
-    .from(QUIZ_BUCKET)
-    .download(quiz.original_pdf);
-  if (dErr || !file) throw new Error("Failed to download original quiz PDF");
-
-  const originalBuf = Buffer.from(await (file as any).arrayBuffer());
-
-  // 2) Load grades (per student JSON)
-  const { data: rows, error: gErr } = await supabase
-    .from("grades")
-    .select("graded_json")
-    .eq("quiz_id", quizId);
-  if (gErr) throw gErr;
-  if (!rows || !rows.length) throw new Error("No grades to stamp");
-
-  const students: StudentGraded[] = (rows as Array<{ graded_json: StudentGraded }>)
-    .map((r) => r.graded_json)
-    .filter(Boolean);
-
-  // 3) Read source PDF, prepare output
-  const src = await PDFDocument.load(originalBuf);
-  const out = await PDFDocument.create();
-
-  const pageCount = src.getPageCount();
-  const page_texts: string[] | undefined = Array.isArray(quiz?.page_texts) ? (quiz.page_texts as any) : undefined;
-
-  // 4) Ensure each student has page_indices
-  const mapped = mapPagesToStudents(pageCount, students, page_texts);
-
-  // 5) Copy pages for each student in order, annotate their section
-  for (const s of mapped) {
-    const indices = Array.isArray(s.page_indices) && s.page_indices.length
-      ? s.page_indices
-      : [...Array(pageCount)].map((_, i) => i); // total fallback: all pages
-
-    const uniqueSorted = Array.from(new Set(indices)).filter(i => i >= 0 && i < pageCount).sort((a, b) => a - b);
-    if (!uniqueSorted.length) continue;
-
-    const copied = await out.copyPages(src, uniqueSorted);
-    const section: PDFPage[] = [];
-    copied.forEach((p) => {
-      out.addPage(p);
-      section.push(p);
-    });
-
-    await annotateStudentSection(out, section, s);
-  }
-
-  // 6) Save, upload, return
-  const bytes = await out.save();
-  const ab = toArrayBuffer(bytes);
-  const objectName = `green/${quizId}-green-merged-${Date.now()}.pdf`;
-
-  const { error: upErr } = await supabase.storage
-    .from(GRADED_BUCKET)
-    .upload(objectName, ab as any, {
-      contentType: "application/pdf",
-      upsert: true,
-    });
-  if (upErr) throw upErr;
-
-  const publicUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${GRADED_BUCKET}/${objectName}`;
-  return publicUrl;
+  // unique + sort
+  return Array.from(new Set(nums)).sort((a: number, b: number) => a - b);
 }
 
-// ------------------ Express route ------------------
-export function setupGreenGradedRoutes(app: Express, supabase: any) {
-  app.post("/build-green-graded/:id", async (req: Request, res: Response) => {
-    try {
-      const quizId = req.params.id;
-      const url = await buildGreenMergedPdf(supabase, quizId);
-      res.json({ success: true, url });
-    } catch (e: any) {
-      console.error("❌ Build Green Merged Error:", e.message);
-      res.status(500).json({ success: false, error: e.message });
+/**
+ * Fallback: split `pageCount` pages as evenly as possible across `n` students.
+ * Each student gets `base` pages, and the first `remainder` students get +1.
+ */
+function evenSplit(pageCount: number, n: number): number[][] {
+  const result: number[][] = [];
+  if (n <= 0 || pageCount <= 0) {
+    for (let i = 0; i < Math.max(0, n); i++) result.push([]);
+    return result;
+  }
+  const base = Math.floor(pageCount / n);
+  let remainder = pageCount - base * n;
+
+  let cursor = 0;
+  for (let i = 0; i < n; i++) {
+    const take = base + (remainder > 0 ? 1 : 0);
+    const slice: number[] = Array.from({ length: take }, (_, k) => cursor + k);
+    result.push(slice);
+    cursor += take;
+    if (remainder > 0) remainder -= 1;
+  }
+  return result;
+}
+
+/**
+ * Try to infer boundaries from `page_texts` by detecting the "Name:" header
+ * that your OCR pipeline injects for the first page of each student's block.
+ * If that pattern isn't reliable/present, we simply return [] to indicate
+ * "couldn't infer", letting the caller fall back to even split.
+ */
+function inferByPageTexts(page_texts?: string[], expectedStudents?: number): number[][] {
+  if (!Array.isArray(page_texts) || page_texts.length === 0 || !expectedStudents) return [];
+
+  // Find pages that look like the first page of a student's block.
+  // Your OCR prompts prepend:
+  //   Name: <value>
+  //   Roll: <value>
+  //   ----
+  const starts: number[] = [];
+  for (let i = 0; i < page_texts.length; i++) {
+    const t = (page_texts[i] || "").toLowerCase();
+    if (t.includes("name:") && t.includes("roll:")) {
+      starts.push(i);
     }
-  });
+  }
+  if (starts.length === 0) return [];
+
+  // Build ranges [start_i, start_{i+1}) and last to end
+  const ranges: number[][] = [];
+  for (let i = 0; i < starts.length; i++) {
+    const s = starts[i];
+    const e = i + 1 < starts.length ? starts[i + 1] : page_texts.length;
+    const indices = Array.from({ length: Math.max(0, e - s) }, (_, k) => s + k);
+    ranges.push(indices);
+  }
+
+  // If we found fewer or more blocks than students, still return what we found;
+  // caller will align or fall back to even split when needed.
+  return ranges;
+}
+
+/**
+ * Map pages to students.
+ * Priority:
+ *  1) If a student already has `page_indices`, sanitize and keep them.
+ *  2) Else, try to infer block boundaries from `page_texts` (if they contain
+ *     the normalized "Name:/Roll:" header you generate in OCR).
+ *  3) Else, do an even split over total `pageCount`.
+ */
+export function mapPagesToStudents(
+  pageCount: number,
+  students: StudentGraded[],
+  page_texts?: string[]
+): StudentGraded[] {
+  const totalPages = Math.max(0, pageCount | 0);
+  const list = Array.isArray(students) ? students : [];
+  const n = Math.max(0, list.length);
+
+  if (n === 0) return [];
+
+  // If everyone already has page_indices, sanitize and return.
+  const allProvided = list.every((s) => Array.isArray(s.page_indices) && s.page_indices.length > 0);
+  if (allProvided) {
+    return list.map((s) => ({
+      ...s,
+      page_indices: normalizeIndices(s.page_indices as unknown[], totalPages),
+    }));
+  }
+
+  // Try inference from page_texts (block starts via "Name:"/"Roll:")
+  const inferredBlocks = inferByPageTexts(page_texts, n);
+  if (inferredBlocks.length >= 1) {
+    // If number of inferred blocks == students, map 1:1
+    if (inferredBlocks.length === n) {
+      return list.map((s, i) => ({
+        ...s,
+        page_indices: normalizeIndices(inferredBlocks[i], totalPages),
+      }));
+    }
+    // If different counts, assign in order while available, then even split for the rest
+    const out: StudentGraded[] = [];
+    const min = Math.min(n, inferredBlocks.length);
+    for (let i = 0; i < min; i++) {
+      out.push({
+        ...list[i],
+        page_indices: normalizeIndices(inferredBlocks[i], totalPages),
+      });
+    }
+    if (min < n) {
+      const remaining = n - min;
+      const used = inferredBlocks.flat().length;
+      // Pages not covered by inference → spread evenly to remaining students
+      const remainingPages: number[] = Array.from({ length: totalPages }, (_, i) => i).filter(
+        (p) => !inferredBlocks.some((blk) => blk.includes(p))
+      );
+      const split = evenSplit(remainingPages.length, remaining);
+      let cursor = 0;
+      for (let j = 0; j < remaining; j++) {
+        const take = split[j] || [];
+        const indices = take.map(() => remainingPages[cursor++]).filter((x) => x != null);
+        out.push({ ...list[min + j], page_indices: normalizeIndices(indices, totalPages) });
+      }
+    }
+    return out;
+  }
+
+  // Even split fallback
+  const split = evenSplit(totalPages, n);
+  return list.map((s, i) => ({
+    ...s,
+    page_indices: normalizeIndices(split[i] || [], totalPages),
+  }));
 }
