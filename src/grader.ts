@@ -103,8 +103,6 @@ ALSO: For 1×4 / 1×2 formats, if the student attempts any subpart with any expl
 }
 
 function leniencyGuidance(leniency: Leniency) {
-  // NOTE: Per your request, none of these should hand out automatic full marks for mere relevance to the entire question,
-  // but we are VERY LENIENT with subparts and relevance thresholds as specified.
   switch (leniency) {
     case "any_relevant_full":
       return "LENIENCY: Be very generous and VERY LENIENT. Accept ANY explanation (pseudocode, grammatical prose, or graphical/diagrammatic). Do NOT require perfect syntax; if syntax is ~40% correct or shows intent, award marks. For 1×4/1×2 formats, if a student attempts any subpart with any explanation/code/syntax, award proportional marks; if exactly 1/2 is correct, give FULL marks for that subpart; if exactly 1/4 is correct, give FULL marks for that subpart. In any 'relevant' case—even if not fully correct—award MORE THAN HALF (>50%) of the available marks, without exceeding maxima.";
@@ -303,7 +301,6 @@ function safeJSON<T = any>(s: string): T | null {
 }
 
 function stripCodeFences(s: string) {
-  // remove leading/trailing ```json ... ``` or ``` ... ```
   return s
     .replace(/^\s*```(?:json)?\s*/i, "")
     .replace(/\s*```\s*$/i, "")
@@ -311,7 +308,6 @@ function stripCodeFences(s: string) {
 }
 
 function extractJsonSlice(s: string): string | null {
-  // try to find a well-formed JSON array; else object
   const a = s.indexOf("[");
   const aEnd = s.lastIndexOf("]");
   if (a !== -1 && aEnd !== -1 && aEnd > a) {
@@ -334,14 +330,12 @@ function normalizeGradedToArray(gradedRaw: string): any[] | null {
   let s = gradedRaw.trim();
   s = stripCodeFences(s);
 
-  // direct parse
   let p = safeJSON<any>(s);
   if (p) {
     if (Array.isArray(p)) return p;
-    return [p]; // model returned a single object
+    return [p];
   }
 
-  // try to slice out JSON part
   const sliced = extractJsonSlice(s);
   if (sliced) {
     const q = safeJSON<any>(sliced);
@@ -360,7 +354,6 @@ function csvEscape(s: any) {
   return t;
 }
 
-// Ensure we hand an ArrayBuffer (not Blob) to Supabase to avoid DOM typings
 function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
   const ab = new ArrayBuffer(u8.byteLength);
   new Uint8Array(ab).set(u8);
@@ -393,7 +386,7 @@ async function annotatePdfWithSummary(
       x: 36,
       y: height - 36,
       size: 14,
-      color: rgb(0.85, 0, 0), // red
+      color: rgb(0.85, 0, 0),
       font,
     });
     if (idx === 0 && remark) {
@@ -417,10 +410,8 @@ function forceSolutionFullMarks(first: any) {
   if (!first || typeof first !== "object") return;
 
   const name = (first.student_name || "Unknown Student").toString().trim();
-  // Duplicate the name (e.g., "John Doe John Doe")
   first.student_name = `${name} ${name}`.trim();
 
-  // For each question/subpart, set marks = max_marks; adjust remarks
   let sumMax = 0;
   if (Array.isArray(first.questions)) {
     for (const q of first.questions) {
@@ -441,7 +432,6 @@ function forceSolutionFullMarks(first: any) {
       } else {
         q.marks = qMax;
       }
-      // tag question remark
       if (typeof q.remarks === "string" && q.remarks.length > 0) {
         q.remarks = `${q.remarks} | Solution key (full marks)`;
       } else {
@@ -451,8 +441,6 @@ function forceSolutionFullMarks(first: any) {
     }
   }
 
-  // total/max
-  // If max_score is present in JSON, prefer it; otherwise sum per-question max if available
   let computedMax = 0;
   if (Array.isArray(first.questions)) {
     for (const q of first.questions) {
@@ -468,7 +456,6 @@ function forceSolutionFullMarks(first: any) {
   first.total_score = sumMax;
   first.max_score = Number(first.max_score ?? computedMax ?? sumMax) || sumMax;
 
-  // add helpful overall remark
   if (typeof first.remarks === "string" && first.remarks.length > 0) {
     first.remarks = `${first.remarks} | Solution paper (awarded full marks).`;
   } else {
@@ -508,8 +495,12 @@ export function setupGraderRoutes(app: Express, supabase: any) {
         .eq("id", quizId)
         .single();
 
-      if (quizError || !quiz?.extracted_text)
-        return res.status(404).json({ error: "No extracted text found for quiz." });
+      // IMPORTANT CHANGE: return 409 (action required) instead of 404
+      if (quizError || !quiz?.extracted_text) {
+        return res
+          .status(409)
+          .json({ error: "No extracted text found. Run OCR (process-quiz) first." });
+      }
 
       const rawText = (quiz.extracted_text || "").slice(0, 15000);
 
@@ -528,10 +519,8 @@ export function setupGraderRoutes(app: Express, supabase: any) {
 
       console.log(`✅ AI Grading Completed (len=${graded?.length || 0})`);
 
-      // ---- Normalize parsed JSON for DB ----
       const parsedArray = normalizeGradedToArray(graded);
 
-      // >>>> NEW: If solution-key option is on, force the first parsed paper to be the solution paper with full marks.
       if (useSolutionKey && Array.isArray(parsedArray) && parsedArray.length > 0) {
         try {
           forceSolutionFullMarks(parsedArray[0]);
@@ -546,20 +535,18 @@ export function setupGraderRoutes(app: Express, supabase: any) {
         console.log(`📦 Parsed ${parsedArray.length} student record(s) from model output`);
       }
 
-      // Save to quizzes (store both raw + parsed json if available)
       const { error: upQuizErr } = await supabase
         .from("quizzes")
         .update({
           grading_mode: gradingMode,
-          formatted_text: graded,                 // raw string for debugging
-          graded_json: parsedArray ?? null,       // JSON/JSONB safe
+          formatted_text: graded,
+          graded_json: parsedArray ?? null,
         })
         .eq("id", quizId);
       if (upQuizErr) {
         console.warn("⚠️ quizzes update failed:", upQuizErr.message);
       }
 
-      // Parse & save per-student grades
       try {
         if (Array.isArray(parsedArray) && parsedArray.length) {
           let saved = 0;
@@ -577,7 +564,6 @@ export function setupGraderRoutes(app: Express, supabase: any) {
               continue;
             }
 
-            // find/create student
             let { data: existingStudent } = await supabase
               .from("students")
               .select("id")
@@ -646,7 +632,6 @@ export function setupGraderRoutes(app: Express, supabase: any) {
     try {
       const quizId = req.params.id;
 
-      // Pull quiz + grades
       const { data: quiz, error: qErr } = await supabase
         .from("quizzes")
         .select("id, created_at")
@@ -660,7 +645,6 @@ export function setupGraderRoutes(app: Express, supabase: any) {
         .eq("quiz_id", quizId);
       if (gErr) throw gErr;
 
-      // Build flat CSV
       const header = [
         "quiz_id",
         "created_at",
@@ -690,7 +674,6 @@ export function setupGraderRoutes(app: Express, supabase: any) {
       const csvContent = out.join("\n");
       const fileName = `csv/${quizId}-${Date.now()}.csv`;
 
-      // Use ArrayBuffer instead of Blob to avoid DOM typings
       const csvBytes = new TextEncoder().encode(csvContent);
       const csvAB = toArrayBuffer(csvBytes);
 
@@ -702,7 +685,6 @@ export function setupGraderRoutes(app: Express, supabase: any) {
         });
       if (upErr) throw upErr;
 
-      // Store path in results_xls field for reuse in your UI
       await supabase
         .from("quizzes")
         .update({ results_xls: fileName })
@@ -724,7 +706,6 @@ export function setupGraderRoutes(app: Express, supabase: any) {
     try {
       const quizId = req.params.id;
 
-      // quiz + original pdf
       const { data: quiz, error: quizError } = await supabase
         .from("quizzes")
         .select("id, original_pdf")
@@ -734,14 +715,12 @@ export function setupGraderRoutes(app: Express, supabase: any) {
         return res.status(404).json({ error: "Quiz or original PDF not found" });
       }
 
-      // download original
       const { data: file, error: dErr } = await supabase.storage
         .from(QUIZ_BUCKET)
         .download(quiz.original_pdf);
       if (dErr || !file) throw new Error("Failed to download original quiz PDF");
       const originalBuf = Buffer.from(await (file as any).arrayBuffer());
 
-      // get grades
       const { data: rows, error: gErr } = await supabase
         .from("grades")
         .select("graded_json")
@@ -765,7 +744,6 @@ export function setupGraderRoutes(app: Express, supabase: any) {
       async function makeAndUpload(label: string, summary: any) {
         const stamped = await annotatePdfWithSummary(originalBuf, summary);
 
-        // Use ArrayBuffer instead of Blob
         const stampedAB = toArrayBuffer(stamped);
         const name = `packs/${quizId}-${label}-${Date.now()}.pdf`;
 
