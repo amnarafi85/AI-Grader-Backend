@@ -19,7 +19,8 @@ import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import { ImageAnnotatorClient } from "@google-cloud/vision";
 import fs from "fs";
-// const pdfParse = require("pdf-parse"); // ✅ compatible import (removed: we lazy-require below)
+// ⬇️ removed top-level pdf-parse require to avoid DOMMatrix crash on Render
+// const pdfParse = require("pdf-parse");
 // @ts-ignore
 import { convert } from "pdf-poppler";
 import sharp, { OutputInfo } from "sharp";
@@ -411,7 +412,6 @@ async function ocrWithOpenAIOCR(pdfPath: string) {
             "----\n" +
             "Rules for <value>:\n" +
             `- CURRENT_PAPER_IS_SOLUTION = ${isSolutionForThisPaper ? "true" : "false"}.\n` +
-            // When treating first as solution, write solution paper title (quiz + section).
             (isSolutionForThisPaper
               ? `- If CURRENT_PAPER_IS_SOLUTION is true, set BOTH Name and Roll to '${solutionName}'.\n`
               : `- If CURRENT_PAPER_IS_SOLUTION is false, try to read the student's name/roll from the page. If none is clearly present, set BOTH Name and Roll to '${unknownName}'.\n`) +
@@ -752,7 +752,7 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
 
     const tryPdfParse = async () => {
       try {
-        // Lazy require so server can start even if pdf-parse needs DOM canvas
+        // ⬇️ Lazy require so server can start even if pdf-parse needs DOM canvas
         const pdfParse = require("pdf-parse");
         const pdfBuffer = fs.readFileSync(tempPdfPath);
         const pdfData = await pdfParse(pdfBuffer);
