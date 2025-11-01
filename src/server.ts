@@ -19,10 +19,10 @@ import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import { ImageAnnotatorClient } from "@google-cloud/vision";
 import fs from "fs";
-// ⬇️ removed top-level pdf-parse require to avoid DOMMatrix crash on Render
+// ❌ DO NOT import pdf-parse at top (causes DOMMatrix crash)
 // const pdfParse = require("pdf-parse");
-// @ts-ignore
-import { convert } from "pdf-poppler";
+// ❌ DO NOT import pdf-poppler at top (crashes on Linux)
+// import { convert } from "pdf-poppler";
 import sharp, { OutputInfo } from "sharp";
 import { setupGraderRoutes } from "./grader";
 import fetch from "node-fetch";
@@ -31,9 +31,9 @@ import fetch from "node-fetch";
 import Tesseract from "tesseract.js";
 
 const app = express();
-const port = 5000;
+// ✅ Use Render's assigned port if present
+const port = Number(process.env.PORT) || 5000;
 import { setupGreenGradedRoutes } from "./green_graded";
-
 import { setupSBABRoute } from "./SBAW";
 
 // ============================================================
@@ -155,6 +155,37 @@ type OcrNamingContext = {
 };
 let CURRENT_OCR_CTX: OcrNamingContext = { firstIsSolution: false, pagesPerStudent: 1 };
 
+// 🔹 Lazy loader for pdf-parse (avoid DOMMatrix crash if it initializes)
+function getPdfParse():
+  | ((buf: Buffer) => Promise<{ text?: string }>)
+  | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const pdfParse = require("pdf-parse");
+    return pdfParse;
+  } catch (e: any) {
+    console.warn("⚠️ pdf-parse unavailable:", e?.message || e);
+    return null;
+  }
+}
+
+// 🔹 Lazy loader for pdf-poppler.convert (avoid Linux crash)
+type PopplerConvertFn = (pdfPath: string, opts: any) => Promise<void>;
+let cachedConvert: PopplerConvertFn | undefined | null = null;
+function getPopplerConvert(): PopplerConvertFn | null {
+  if (cachedConvert !== null) return cachedConvert || null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { convert } = require("pdf-poppler");
+    cachedConvert = convert as PopplerConvertFn;
+    return cachedConvert;
+  } catch (e: any) {
+    console.warn("⚠️ pdf-poppler unavailable on this platform:", e?.message || e);
+    cachedConvert = undefined;
+    return null;
+  }
+}
+
 // Small helper to cap base64 data-URIs to ~19MB (OpenAI hard limit ~20MB)
 async function toDataURIWithCap(imgPath: string, maxBytes = 19 * 1024 * 1024): Promise<string> {
   let buf: Buffer = fs.readFileSync(imgPath) as Buffer;
@@ -172,6 +203,12 @@ async function toDataURIWithCap(imgPath: string, maxBytes = 19 * 1024 * 1024): P
 // 🖼️ GOOGLE VISION IMAGES MULTIVARIANT
 // ============================================================
 async function ocrWithVisionImagesMultiVariant(pdfPath: string, baseKey: string) {
+  const convert = getPopplerConvert();
+  if (!convert) {
+    console.warn("⚠️ Skipping Images++ OCR: pdf-poppler not available.");
+    return "";
+  }
+
   console.log("🖼️ Vision OCR Images++ (DPI 350, variants & angles)");
   const outputBase = path.join(__dirname, `page_${baseKey}`);
   const opts: any = {
@@ -306,6 +343,12 @@ async function ocrWithVisionPdfNative(pdfPath: string) {
 // 🔡 TESSERACT FALLBACK
 // ============================================================
 async function ocrWithTesseract(pdfPath: string, baseKey: string) {
+  const convert = getPopplerConvert();
+  if (!convert) {
+    console.warn("⚠️ Skipping Tesseract image conversion: pdf-poppler not available.");
+    return "";
+  }
+
   console.log("🔡 Tesseract fallback (PSM 6 & 7)");
   const outputBase = path.join(__dirname, `tess_${baseKey}`);
   await convert(pdfPath, {
@@ -314,7 +357,7 @@ async function ocrWithTesseract(pdfPath: string, baseKey: string) {
     out_prefix: `tess_${baseKey}`,
     page: null,
     dpi: 300,
-  } as any); // 👈 allow dpi in options
+  } as any);
 
   const dir = path.dirname(outputBase);
   const imageFiles = fs
@@ -353,6 +396,12 @@ async function ocrWithTesseract(pdfPath: string, baseKey: string) {
 // 🧠 OpenAI OCR API (upgraded model + preprocessing + prompting)
 // ============================================================
 async function ocrWithOpenAIOCR(pdfPath: string) {
+  const convert = getPopplerConvert();
+  if (!convert) {
+    console.warn("⚠️ Skipping OpenAI OCR (image pathway): pdf-poppler not available.");
+    return "";
+  }
+
   console.log("🧠 OpenAI OCR API (Vision-based model)");
 
   type OpenAIResp = {
@@ -382,7 +431,7 @@ async function ocrWithOpenAIOCR(pdfPath: string) {
       out_prefix: path.basename(outputBase),
       page: null,
       dpi: 420,
-    } as any); // 👈 allow dpi in options
+    } as any);
 
     const dir = path.dirname(outputBase);
     const rawImages = fs
@@ -511,6 +560,12 @@ async function ocrWithOpenAIOCR(pdfPath: string) {
 // 🟣 Gemini OCR (custom endpoint OR official Google Gemini REST)
 // ============================================================
 async function ocrWithGeminiOCR(pdfPath: string) {
+  const convert = getPopplerConvert();
+  if (!convert) {
+    console.warn("⚠️ Skipping Gemini OCR (image pathway): pdf-poppler not available.");
+    return "";
+  }
+
   console.log("🧠 Gemini OCR API");
 
   const relayBase = process.env.GEMINIOCR_BASE_URL;
@@ -532,7 +587,7 @@ async function ocrWithGeminiOCR(pdfPath: string) {
       out_prefix: path.basename(outputBase),
       page: null,
       dpi: 420,
-    } as any); // 👈 allow dpi in options
+    } as any);
 
     const dir = path.dirname(outputBase);
     const pngs = fs
@@ -752,8 +807,8 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
 
     const tryPdfParse = async () => {
       try {
-        // ⬇️ Lazy require so server can start even if pdf-parse needs DOM canvas
-        const pdfParse = require("pdf-parse");
+        const pdfParse = getPdfParse();
+        if (!pdfParse) return "";
         const pdfBuffer = fs.readFileSync(tempPdfPath);
         const pdfData = await pdfParse(pdfBuffer);
         const txt = stripGarbage(pdfData.text || "");
@@ -782,7 +837,7 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
         console.log(`🖼️ Vision Images++ extracted ${txt.length} chars`);
         return txt;
       } catch (e: any) {
-        console.warn("⚠️ Vision Images++ failed:", e.message);
+        console.warn("⚠️ Vision Images++ failed or skipped:", e.message);
         return "";
       }
     };
@@ -793,7 +848,7 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
         console.log(`🔡 Tesseract extracted ${txt.length} chars`);
         return txt;
       } catch (e: any) {
-        console.warn("⚠️ Tesseract failed:", e.message);
+        console.warn("⚠️ Tesseract failed or skipped:", e.message);
         return "";
       }
     };
@@ -804,7 +859,7 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
         console.log(`🧠 OpenAI OCR extracted ${txt.length} chars`);
         return txt;
       } catch (e: any) {
-        console.warn("⚠️ OpenAI OCR failed:", e.message);
+        console.warn("⚠️ OpenAI OCR failed or skipped:", e.message);
         return "";
       }
     };
@@ -815,7 +870,7 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
         console.log(`🟣 Gemini OCR extracted ${txt.length} chars`);
         return txt;
       } catch (e: any) {
-        console.warn("⚠️ Gemini OCR failed:", e.message);
+        console.warn("⚠️ Gemini OCR failed or skipped:", e.message);
         return "";
       }
     };
