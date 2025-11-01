@@ -75,13 +75,32 @@ const visionClient = new ImageAnnotatorClient({
 // ============================================================
 // ⚙️ MIDDLEWARE
 // ============================================================
-app.use(
-  cors({
-    origin: ["http://localhost:5173","https://ai-grader-frontend-n08j.onrender.com"],
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type"],
-  })
-);
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://ai-grader-frontend-n08j.onrender.com",
+];
+
+const corsOptions: cors.CorsOptions = {
+  origin(origin, callback) {
+    // allow server-to-server / curl (no Origin) and the whitelisted frontends
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error("Not allowed by CORS"));
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+  ],
+  // credentials: true, // uncomment if you ever use cookies
+};
+
+app.use(cors(corsOptions));
+// explicitly answer all preflight checks
+app.options("*", cors(corsOptions));
+
 app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
