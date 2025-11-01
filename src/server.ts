@@ -19,7 +19,7 @@ import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import { ImageAnnotatorClient } from "@google-cloud/vision";
 import fs from "fs";
-// const pdfParse = require("pdf-parse"); // ✅ compatible import (moved to lazy require)
+// const pdfParse = require("pdf-parse"); // ✅ compatible import (removed: we lazy-require below)
 // @ts-ignore
 import { convert } from "pdf-poppler";
 import sharp, { OutputInfo } from "sharp";
