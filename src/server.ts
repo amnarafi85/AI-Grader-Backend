@@ -12,7 +12,7 @@ dotenv.config({ path: path.resolve(__dirname, "../.env") });
 console.log("🧪 OPENAI_API_KEY Loaded:", process.env.OPENAI_API_KEY ? "✅ Yes" : "❌ No");
 console.log("🧪 GOOGLE_API_KEY Loaded:", process.env.GOOGLE_API_KEY ? "✅ Yes" : "❌ No");
 
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import multer from "multer";
 
@@ -73,91 +73,41 @@ const visionClient = new ImageAnnotatorClient({
 });
 
 // ============================================================
-// ⚙️ MIDDLEWARE
+// ⚙️ GLOBAL MIDDLEWARE (CORS, limits, preflights, vary, etc.)
 // ============================================================
 const allowedOrigins = [
   "http://localhost:5173",
   "https://ai-grader-frontend-n08j.onrender.com",
 ];
 
-const corsOptions: cors.CorsOptions = {
-  origin(origin, callback) {
-    // allow server-to-server / curl (no Origin) and the whitelisted frontends
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error("Not allowed by CORS"));
-  },
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "X-Requested-With",
-    "Accept",
-    "Origin",
-  ],
-  // credentials: true, // uncomment if you ever use cookies
-};
+// Ensure caches vary by Origin
+app.use((req, res, next) => {
+  res.setHeader("Vary", "Origin");
+  next();
+});
 
-app.use(cors(corsOptions));
-// explicitly answer all preflight checks
-app.options("*", cors(corsOptions));
+// Bigger body limits to avoid silent 413 → ERR_FAILED on large payloads
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: false, limit: "25mb" }));
 
-app.use(express.json());
+// CORS (allow server-to-server/curl and your whitelisted frontends)
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error("Not allowed by CORS"));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
+    credentials: false,
+  })
+);
+
+// Explicitly answer all preflights
+app.options("*", cors());
 
 const upload = multer({ storage: multer.memoryStorage() });
-
-// ============================================================
-// ✅ HEALTH CHECK
-// ============================================================
-app.get("/", (_req: Request, res: Response) => {
-  res.json({ message: "✅ AI Grader Backend Running" });
-});
-
-// ============================================================
-// 📤 UPLOAD ENDPOINT
-// ============================================================
-app.post("/upload", upload.single("file"), async (req: Request, res: Response) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-    const teacherId = req.query.teacher_id as string;
-    if (!teacherId) return res.status(400).json({ error: "teacher_id is required" });
-
-    // 🔹 NEW: optional quiz metadata
-    const title = (req.query.title as string) || null;      // e.g., "Quiz 1"
-    const section = (req.query.section as string) || null;  // e.g., "Section A"
-
-    const { originalname, buffer, mimetype } = req.file;
-    console.log("📂 Uploading file:", originalname);
-
-    const { data: fileData, error: uploadError } = await supabase.storage
-      .from("quizzes")
-      .upload(`uploads/${Date.now()}-${originalname}`, buffer, { contentType: mimetype });
-
-    if (uploadError) throw uploadError;
-    console.log("✅ File uploaded to storage:", fileData?.path);
-
-    const { data: quizData, error: dbError } = await supabase
-      .from("quizzes")
-      .insert([
-        {
-          teacher_id: teacherId,
-          original_pdf: fileData?.path,
-          extracted_text: null,
-          // 🔹 NEW FIELDS persisted
-          title,
-          section,
-        },
-      ])
-      .select();
-
-    if (dbError) throw dbError;
-
-    console.log("✅ Quiz record inserted:", quizData);
-    res.json({ success: true, row: quizData });
-  } catch (err: any) {
-    console.error("❌ Upload Error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // ============================================================
 // 🧰 Helpers
@@ -248,6 +198,60 @@ async function toDataURIWithCap(imgPath: string, maxBytes = 19 * 1024 * 1024): P
 
   return `data:image/png;base64,${buf.toString("base64")}`;
 }
+
+// ============================================================
+// ✅ HEALTH CHECK
+// ============================================================
+app.get("/", (_req: Request, res: Response) => {
+  res.json({ message: "✅ AI Grader Backend Running" });
+});
+
+// ============================================================
+// 📤 UPLOAD ENDPOINT
+// ============================================================
+app.post("/upload", upload.single("file"), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const teacherId = req.query.teacher_id as string;
+    if (!teacherId) return res.status(400).json({ error: "teacher_id is required" });
+
+    // 🔹 NEW: optional quiz metadata
+    const title = (req.query.title as string) || null;      // e.g., "Quiz 1"
+    const section = (req.query.section as string) || null;  // e.g., "Section A"
+
+    const { originalname, buffer, mimetype } = req.file;
+    console.log("📂 Uploading file:", originalname);
+
+    const { data: fileData, error: uploadError } = await supabase.storage
+      .from("quizzes")
+      .upload(`uploads/${Date.now()}-${originalname}`, buffer, { contentType: mimetype });
+
+    if (uploadError) throw uploadError;
+    console.log("✅ File uploaded to storage:", fileData?.path);
+
+    const { data: quizData, error: dbError } = await supabase
+      .from("quizzes")
+      .insert([
+        {
+          teacher_id: teacherId,
+          original_pdf: fileData?.path,
+          extracted_text: null,
+          // 🔹 NEW FIELDS persisted
+          title,
+          section,
+        },
+      ])
+      .select();
+
+    if (dbError) throw dbError;
+
+    console.log("✅ Quiz record inserted:", quizData);
+    res.json({ success: true, row: quizData });
+  } catch (err: any) {
+    console.error("❌ Upload Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ============================================================
 // 🖼️ GOOGLE VISION IMAGES MULTIVARIANT
@@ -538,12 +542,13 @@ async function ocrWithOpenAIOCR(pdfPath: string) {
       const raw = path.join(dir, img);
 
       let preOut = raw;
-      if (s) {
+      const sharpInst = getSharp();
+      if (sharpInst) {
         try {
           preOut = raw.replace(".png", "_pre.png");
-          const meta = await s(raw).metadata();
+          const meta = await sharpInst(raw).metadata();
           const targetWidth = Math.max(Math.min((meta.width || 2400), 2800), 1800);
-          await s(raw)
+          await sharpInst(raw)
             .resize({ width: targetWidth })
             .grayscale()
             .normalize()
@@ -616,7 +621,7 @@ async function ocrWithOpenAIOCR(pdfPath: string) {
         console.warn(`⚠️ No meaningful text from ${img}${lastErrText ? " — last error: " + lastErrText : ""}`);
       }
 
-      if (s && preOut !== raw) {
+      if (sharpInst && preOut !== raw) {
         try { fs.unlinkSync(preOut); } catch {}
       }
       try { fs.unlinkSync(raw); } catch {}
@@ -654,13 +659,8 @@ async function ocrWithGeminiOCR(pdfPath: string) {
 
   try {
     const outputBase = path.join(__dirname, `gemini_${Date.now()}`);
-    await convert(pdfPath, {
-      format: "png",
-      out_dir: path.dirname(outputBase),
-      out_prefix: path.basename(outputBase),
-      page: null,
-      dpi: 420,
-    } as any);
+    const convertOpts: any = { format: "png", out_dir: path.dirname(outputBase), out_prefix: path.basename(outputBase), page: null, dpi: 420 };
+    await convert(pdfPath, convertOpts);
 
     const dir = path.dirname(outputBase);
     const pngs = fs
@@ -856,6 +856,7 @@ async function ocrWithGeminiOCR(pdfPath: string) {
 // 🧠 OCR PROCESS ENDPOINT
 // ============================================================
 app.post("/process-quiz/:id", async (req: Request, res: Response) => {
+  let tempPdfPath = "";
   try {
     const quizId = req.params.id;
     const engine = (req.query.engine as string) || "auto";
@@ -875,7 +876,7 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
 
     if (downloadError || !file) throw new Error("Failed to download quiz PDF");
 
-    const tempPdfPath = path.join(__dirname, `temp_${quizId}.pdf`);
+    tempPdfPath = path.join(__dirname, `temp_${quizId}.pdf`);
     fs.writeFileSync(tempPdfPath, Buffer.from(await (file as any).arrayBuffer()));
     console.log("📄 PDF downloaded locally");
 
@@ -906,11 +907,15 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
 
     const tryVisionPdf = async () => {
       try {
+        // Guard: Vision PDF native requires GCS wiring; skip if not set up here
+        if (!process.env.GOOGLE_PROJECT_ID) {
+          throw new Error("Vision PDF disabled: no GCS configured");
+        }
         const txt = await ocrWithVisionPdfNative(tempPdfPath);
         console.log(`📘 Vision PDF native extracted ${txt.length} chars`);
         return txt;
       } catch (e: any) {
-        console.warn("⚠️ Vision PDF native failed:", e.message);
+        console.warn("⚠️ Vision PDF native skipped:", e.message);
         return "";
       }
     };
@@ -977,9 +982,9 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
       extractedText = await tryGeminiOCR();
       if (!isMeaningful(extractedText)) extractedText = await tryTesseract();
     } else {
-      // auto: pdf-parse → vision-pdf → openai → gemini → images → tesseract
+      // REORDERED auto: skip Vision PDF (needs GCS); prefer serverless-friendly flow
+      // auto: pdf-parse → openai → gemini → images → tesseract
       extractedText = await tryPdfParse();
-      if (!isMeaningful(extractedText)) extractedText = await tryVisionPdf();
       if (!isMeaningful(extractedText)) extractedText = await tryOpenAIOCR();
       if (!isMeaningful(extractedText)) extractedText = await tryGeminiOCR();
       if (!isMeaningful(extractedText)) extractedText = await tryImages();
@@ -1008,13 +1013,14 @@ app.post("/process-quiz/:id", async (req: Request, res: Response) => {
       .eq("id", quizId);
 
     if (updateError) throw updateError;
-    fs.unlinkSync(tempPdfPath);
+    try { fs.existsSync(tempPdfPath) && fs.unlinkSync(tempPdfPath); } catch {}
     console.log("🧹 Cleaned up temp files");
 
     // ❌ Removed auto-trigger of grading. Frontend will call /analyze-quiz with user-selected settings.
 
     res.json({ success: true, text: extractedText });
   } catch (err: any) {
+    try { tempPdfPath && fs.existsSync(tempPdfPath) && fs.unlinkSync(tempPdfPath); } catch {}
     console.error("❌ OCR Error:", err.message);
     res.status(500).json({ error: err.message });
   }
@@ -1029,6 +1035,22 @@ setupGreenGradedRoutes(app, supabase);
 // ...
 // setupSBAWRoutes(app, supabase);
 setupSBABRoute(app, supabase);
+
+// ============================================================
+// 🧯 GLOBAL ERROR HANDLER (ensures CORS on errors)
+// ============================================================
+app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
+  const origin = req.headers.origin as string | undefined;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+  const status = err?.status || 500;
+  const msg = err?.message || "Server error";
+  console.error("💥 Uncaught error:", msg);
+  if (res.headersSent) return;
+  res.status(status).json({ success: false, error: msg });
+});
 
 // ============================================================
 // 🚀 START SERVER
